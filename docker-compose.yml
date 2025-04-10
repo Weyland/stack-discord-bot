@@ -1,0 +1,15 @@
+---
+services:
+  discord-bot:
+    build: .
+    container_name: discord-bot
+    env_file:
+      - .env
+    environment:
+      DISCORD_CHANNEL_ID: ${DISCORD_CHANNEL_ID}
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+    image: ghcr.io/weyland/stack-discord-bot:latest
+    restart: unless-stopped
+    volumes:
+      - ./data:/usr/src/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
