@@ -13,6 +13,9 @@ dotenv.config();
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN!;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID!;
+const DOCKER_HUB_USERNAME = process.env.DOCKER_HUB_USERNAME;
+const DOCKER_HUB_TOKEN = process.env.DOCKER_HUB_TOKEN;
+
 const CHECK_INTERVAL = 5 * 60 * 1000;
 const VERSION_FILE = "./data/versions.json";
 
@@ -22,6 +25,7 @@ type VersionMap = {
 };
 
 let versionData: VersionMap = loadVersionData();
+const dockerHubCache: Record<string, { tag: string; updated: string }[]> = {};
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -29,7 +33,10 @@ function loadVersionData(): VersionMap {
   try {
     return JSON.parse(fs.readFileSync(VERSION_FILE, "utf8"));
   } catch {
-    return { images: {}, announced: {} };
+    return {
+      images: {},
+      announced: {},
+    };
   }
 }
 
@@ -70,13 +77,28 @@ async function getMatchingLatestTag(
 async function getAllDockerHubTags(
   image: string
 ): Promise<{ tag: string; updated: string }[]> {
+  if (dockerHubCache[image]) {
+    return dockerHubCache[image];
+  }
+
   const tags: { tag: string; updated: string }[] = [];
   let page = 1;
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+
+  if (DOCKER_HUB_USERNAME && DOCKER_HUB_TOKEN) {
+    const auth = Buffer.from(
+      `${DOCKER_HUB_USERNAME}:${DOCKER_HUB_TOKEN}`
+    ).toString("base64");
+    headers["Authorization"] = `Basic ${auth}`;
+  }
 
   try {
     while (true) {
       const url = `https://hub.docker.com/v2/repositories/${image}/tags?page_size=100&page=${page}&ordering=last_updated`;
-      const res = await fetch(url);
+      const res = await fetch(url, { headers });
       if (!res.ok) throw new Error(`Docker Hub error: ${res.statusText}`);
       const data = await res.json();
 
@@ -87,6 +109,7 @@ async function getAllDockerHubTags(
       if (!data.next) break;
       page++;
     }
+    dockerHubCache[image] = tags;
   } catch (err) {
     console.warn(`⚠️ Docker Hub tag fetch failed for ${image}:`, err);
   }
@@ -98,35 +121,31 @@ function findLatestMatchingTag(
   tags: { tag: string; updated: string }[],
   baseTag: string
 ): string | null {
-  const isLatestLike = baseTag === "latest" || baseTag.startsWith("latest");
+  const semverCandidates = tags
+    .filter((t) => semver.valid(semver.coerce(t.tag)))
+    .map((t) => ({
+      tag: t.tag,
+      version: semver.coerce(t.tag)!,
+      updated: t.updated,
+    }));
 
-  const semverTags = tags
-    .map(({ tag, updated }) => ({
-      tag,
-      version: semver.coerce(tag),
-      updated,
-    }))
-    .filter((t) => t.version !== null && !semver.prerelease(t.version!));
-
-  if (isLatestLike) {
-    const latestSemver = semverTags.sort(
-      (a, b) => new Date(b.updated).getTime() - new Date(a.updated).getTime()
-    )[0];
-    return latestSemver?.tag || null;
+  if (baseTag === "latest") {
+    const sorted = semverCandidates.sort((a, b) => {
+      return new Date(b.updated).getTime() - new Date(a.updated).getTime();
+    });
+    return sorted.length > 0 ? sorted[0].tag : null;
   }
 
-  const filtered = semverTags.filter(
-    ({ tag }) =>
-      tag.startsWith(baseTag + ".") ||
-      tag === baseTag ||
-      tag.startsWith(baseTag + "-")
-  );
+  const matching = semverCandidates
+    .filter(
+      (t) =>
+        t.tag.startsWith(baseTag + ".") ||
+        t.tag === baseTag ||
+        t.tag.startsWith(baseTag + "-")
+    )
+    .sort((a, b) => semver.rcompare(a.version, b.version));
 
-  const sorted = filtered.sort((a, b) =>
-    semver.rcompare(a.version!, b.version!)
-  );
-
-  return sorted[0]?.tag || null;
+  return matching.length > 0 ? matching[0].tag : null;
 }
 
 async function checkForNewVersions() {
